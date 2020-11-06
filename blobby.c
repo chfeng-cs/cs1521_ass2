@@ -160,6 +160,7 @@ void write_content(int fd, char *filename, size_t pathname_len, int flag) {
 		write(fd, &hash_val, BLOBETTE_HASH_BYTES);
 		close(ffd);
 		if (flag) {
+			// printf("open: %s\n", filename);
 			DIR *dirp = opendir(filename);
 			struct dirent *de;
 			if (dirp == NULL) {
@@ -168,22 +169,22 @@ void write_content(int fd, char *filename, size_t pathname_len, int flag) {
 			}
 			while ((de = readdir(dirp)) != NULL) {
 				char *c_filename;
+				int j = 0;
 				if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) {
 					continue;
 				}
 				c_filename = malloc(BLOBETTE_MAX_PATHNAME_LENGTH);
 				memcpy(c_filename, filename, pathname_len);
 				c_filename[pathname_len] = '/';
-				while (de->d_name[i]) {
-					c_filename[pathname_len + i + 1] = de->d_name[i];
-					i++;
+				while (de->d_name[j]) {
+					c_filename[pathname_len + j + 1] = de->d_name[j];
+					j++;
 				}
-				c_filename[pathname_len + i + 1] = 0;
-				write_content(fd, c_filename, pathname_len + i + 1, 1);
+				c_filename[pathname_len + j + 1] = 0;
+				write_content(fd, c_filename, pathname_len + j + 1, 1);
 				free(c_filename);
 			}
-			closedir(dirp);
-			
+			closedir(dirp);	
 		}
 	} else if (S_ISREG(_stat.st_mode)) {
 		ssize_t copied = 0;
@@ -434,9 +435,9 @@ void create_blob(char *blob_pathname, char *pathnames[], int compress_blob) {
 
 	char *filename= malloc(BLOBETTE_MAX_PATHNAME_LENGTH);
 	int fd = open(blob_pathname, O_WRONLY|O_CREAT, 0644);
-	int pfd = fd;
-	int pipe_file_descriptors[4];
-	posix_spawn_file_actions_t actions;
+	// int pfd = fd;
+	// int pipe_file_descriptors[4];
+	// posix_spawn_file_actions_t actions;
 	// if (compress_blob) {
 	// 	if (pipe(pipe_file_descriptors) == -1) {
 	// 		perror("pipe");
