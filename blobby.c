@@ -109,6 +109,7 @@ void write_content(int fd, char *filename, size_t pathname_len, int flag) {
 	struct stat _stat;
 	unsigned long content_len;
 	u_int8_t tmp, hash_val = 0;
+	int len;
 	int i;
 
 	i = stat(filename, &_stat);
@@ -124,7 +125,7 @@ void write_content(int fd, char *filename, size_t pathname_len, int flag) {
 	}
 	// printf("content_len: %d\n", content_len);
 	buf[0] = 0x42;
-	write(fd, buf, BLOBETTE_MAGIC_NUMBER_BYTES);
+	len = write(fd, buf, BLOBETTE_MAGIC_NUMBER_BYTES);
 	hash_val = blobby_hash(hash_val, 0x42);
 
 	for (i=0; i<BLOBETTE_MODE_LENGTH_BYTES; i++) {
@@ -435,36 +436,43 @@ void create_blob(char *blob_pathname, char *pathnames[], int compress_blob) {
 
 	char *filename= malloc(BLOBETTE_MAX_PATHNAME_LENGTH);
 	int fd = open(blob_pathname, O_WRONLY|O_CREAT, 0644);
-	// int pfd = fd;
-	// int pipe_file_descriptors[4];
-	// posix_spawn_file_actions_t actions;
-	// if (compress_blob) {
-	// 	if (pipe(pipe_file_descriptors) == -1) {
-	// 		perror("pipe");
-	// 		exit(1);
-	// 	}
-	// 	if (pipe(pipe_file_descriptors + 2) == -1) {
-	// 		perror("pipe");
-	// 		exit(1);
-	// 	}
-	// 	if (posix_spawn_file_actions_init(&actions) != 0) {
-	// 		perror("posix_spawn_file_actions_init");
-	// 		exit(1);
-	// 	}
+	int pfd = fd;
+	int pipe_file_descriptors[4];
+	posix_spawn_file_actions_t actions;
+	if (compress_blob) {
+		if (pipe(pipe_file_descriptors) == -1) {
+			perror("pipe");
+			exit(1);
+		}
+		if (pipe(pipe_file_descriptors + 2) == -1) {
+			perror("pipe");
+			exit(1);
+		}
+		if (posix_spawn_file_actions_init(&actions) != 0) {
+			perror("posix_spawn_file_actions_init");
+			exit(1);
+		}
 
-	// 	if (posix_spawn_file_actions_addclose(&actions, pipe_file_descriptors[1]) != 0 ||
-	// 			posix_spawn_file_actions_addclose(&actions, pipe_file_descriptors[2]) != 0) {
-	// 		perror("posix_spawn_file_actions_addclose");
-	// 		exit(1);
-	// 	}
+		if (posix_spawn_file_actions_addclose(&actions, pipe_file_descriptors[1]) != 0 ||
+				posix_spawn_file_actions_addclose(&actions, pipe_file_descriptors[2]) != 0) {
+			perror("posix_spawn_file_actions_addclose");
+			exit(1);
+		}
 		
-	// 	if (posix_spawn_file_actions_adddup2(&actions, pipe_file_descriptors[0], 0) != 0 ||
-	// 			posix_spawn_file_actions_adddup2(&actions, pipe_file_descriptors[3], 1) != 0) {
-	// 		perror("posix_spawn_file_actions_adddup2");
-	// 		exit(1);
-	// 	}
-	// 	pfd = pipe_file_descriptors[1];
-	// }
+		if (posix_spawn_file_actions_adddup2(&actions, pipe_file_descriptors[0], 0) != 0 ||
+				posix_spawn_file_actions_adddup2(&actions, pipe_file_descriptors[3], 1) != 0) {
+			perror("posix_spawn_file_actions_adddup2");
+			exit(1);
+		}
+		pfd = pipe_file_descriptors[1];
+		char *xz_argv[] = {"xz", "-c", NULL};
+		pid_t pid;
+		extern char **environ;
+		if (posix_spawn(&pid, "/usr/bin/xz", &actions, NULL, xz_argv, environ) != 0) {
+			perror("spawn");
+			exit(1);
+		}
+	}
 	for (int p = 0; pathnames[p]; p++) {
 		int i = 0;
 		char tmp;
@@ -475,32 +483,37 @@ void create_blob(char *blob_pathname, char *pathnames[], int compress_blob) {
 				filename[i] = _filename[i];
 			} else {
 				filename[i] = 0;
-				write_content(fd, filename, i, 0);
+				write_content(pfd, filename, i, 0);
 				filename[i] = '/';
 			}
 			i++;
 		}
 		filename[i] = 0;
-		write_content(fd, filename, i, 1);
+		write_content(pfd, filename, i, 1);
 	}
-	// if (compress_blob) {
-	// 	close(pipe_file_descriptors[0]);
-	// 	close(pipe_file_descriptors[1]);
-	// 	close(pipe_file_descriptors[2]);
-	// 	// TODO
-	// 	u_int8_t buf[BUF_SIZE];
-	// 	int len;
-	// 	while ((len = read(pipe_file_descriptors[2], buf, BUF_SIZE)) > 0) {
-	// 		printf("len = %d\n", len);
-	// 		int i;
-	// 		for (i=0; i<len; i++) {
-	// 			printf("%02x ", buf[i]);
-	// 		}
-	// 		write(fd, buf, len);
-	// 	}
-	// 	close(pipe_file_descriptors[3]);
+	// printf("---------\n");
+
+	if (compress_blob) {
+		// printf("compress_blob:%d\n", compress_blob);
+
+		u_int8_t buf[BUF_SIZE];
+		int len;
+		close(pipe_file_descriptors[0]);
+		close(pipe_file_descriptors[1]);
+		close(pipe_file_descriptors[3]);
+		while ((len = read(pipe_file_descriptors[2], buf, BUF_SIZE)) > 0) {
+			
+			// printf("len = %d\n", len);
+			int i;
+			// for (i=0; i<len; i++) {
+			// 	printf("%02x ", buf[i]);
+			// }
+			write(fd, buf, len);
+		}
 		
-	// }
+		close(pipe_file_descriptors[2]);
+		
+	}
 
 	close(fd);
 	free(filename);
