@@ -309,7 +309,74 @@ action_t process_arguments(int argc, char *argv[], char **blob_pathname,
 	return a_invalid;
 }
 
+int check_xz(int fd, int *pipe_file_descriptors, pid_t *pid) {
+	const int CHECK_LEN = 4;
+	u_int8_t head[CHECK_LEN];
+	u_int8_t xz_head[] = {0xfd, 0x37, 0x7a, 0x58};
+	int i, flag = 1;
+	read(fd, head, CHECK_LEN);
+	for(i=0; i<CHECK_LEN; i++) {
+		if (head[i] != xz_head[i]) {
+			flag = 0;
+			break;
+		}
+	}
+	lseek(fd, 0, SEEK_SET);
+	if (flag == 0) {
+		return 0;
+	}
+	posix_spawn_file_actions_t actions;
+	if (pipe(pipe_file_descriptors) == -1) {
+		perror("pipe");
+		exit(1);
+	}
+	if (pipe(pipe_file_descriptors + 2) == -1) {
+		perror("pipe");
+		exit(1);
+	}
+	if (posix_spawn_file_actions_init(&actions) != 0) {
+		perror("posix_spawn_file_actions_init");
+		exit(1);
+	}
 
+	if (posix_spawn_file_actions_addclose(&actions, pipe_file_descriptors[1]) != 0 ||
+			posix_spawn_file_actions_addclose(&actions, pipe_file_descriptors[2]) != 0) {
+		perror("posix_spawn_file_actions_addclose");
+		exit(1);
+	}
+	
+	if (posix_spawn_file_actions_adddup2(&actions, pipe_file_descriptors[0], 0) != 0 ||
+			posix_spawn_file_actions_adddup2(&actions, pipe_file_descriptors[3], 1) != 0) {
+		perror("posix_spawn_file_actions_adddup2");
+		exit(1);
+	}
+	char *xz_argv[] = {"xz", "-d", NULL};
+	extern char **environ;
+	if (posix_spawn(pid, "/usr/bin/xz", &actions, NULL, xz_argv, environ) != 0) {
+		perror("spawn");
+		exit(1);
+	}
+	return 1;
+	
+}
+
+
+void print_file(int fd) {
+	u_int8_t buf[BUF_SIZE];
+	ssize_t copied = 0;
+	size_t len = 0;
+	do {
+		len = read(fd, buf, BUF_SIZE);
+		int i;
+		for(i=0; i<len; i++) {
+			printf("%02x ", buf[i]);
+		}
+		copied += len;
+	} while (len > 0);
+	printf("\ncopied: %lu\n", copied);
+	int g = lseek(fd, 0, SEEK_SET);
+	printf("g=%d\n", g);
+}
 // list the contents of blob_pathname
 
 void list_blob(char *blob_pathname) {
@@ -325,17 +392,57 @@ void list_blob(char *blob_pathname) {
 		free(filename);
 		exit(1);
 	}
+	int pipe_file_descriptors[4];
+	pid_t pid;
+	int xz = check_xz(fd, pipe_file_descriptors, &pid);
+	if (xz) {
+		u_int8_t buf[BUF_SIZE];
+		int len;
+		close(pipe_file_descriptors[0]);
+		do {
+			len = read(fd, buf, BUF_SIZE);
+			// printf("len1 = %d\n", len);
+			len = write(pipe_file_descriptors[1], buf, len);
+			// printf("len 2= %d\n", len);
+		} while (len > 0);
+		
+		close(pipe_file_descriptors[1]);
+		close(pipe_file_descriptors[3]);
+		close(fd);
+		fd = pipe_file_descriptors[2];
+	}
+
 	while (get_metadata(fd, buf, &mode, &pathname_len, &content_len, NULL)) {
 		ssize_t copied = 0;
 		printf("%06lo %5lu ", mode, content_len);
+		// printf("pathname_len: %ld\n", pathname_len);
+		// printf("content_len: %ld\n", content_len);
+
 		while (copied < pathname_len) {
-			copied += read(fd, filename + copied, pathname_len - copied);
+			int tmp = read(fd, filename + copied, pathname_len - copied);
+			// printf("tmp: %d\n", tmp);
+			copied += tmp;
 		}
 		filename[pathname_len] = 0;
 		printf("%s\n", filename);
-		lseek(fd, content_len+1, SEEK_CUR);
+		copied = 0;
+		while (copied < content_len + 1) {
+			int left = content_len + 1 - copied;
+			if (left > BLOBETTE_MAX_PATHNAME_LENGTH) {
+				left = BLOBETTE_MAX_PATHNAME_LENGTH;
+			}
+			copied += read(fd, filename, left);
+		}
+		// lseek(fd, content_len+1, SEEK_CUR);
+		
 	}
 	close(fd);
+	if (xz) {
+		if (waitpid(pid, NULL, 0) == -1) {
+			perror("waitpid");
+			exit(1);
+		}
+	}
 	free(filename);
 }
 
@@ -491,10 +598,8 @@ void create_blob(char *blob_pathname, char *pathnames[], int compress_blob) {
 		filename[i] = 0;
 		write_content(pfd, filename, i, 1);
 	}
-	// printf("---------\n");
 
 	if (compress_blob) {
-		// printf("compress_blob:%d\n", compress_blob);
 
 		u_int8_t buf[BUF_SIZE];
 		int len;
@@ -502,12 +607,6 @@ void create_blob(char *blob_pathname, char *pathnames[], int compress_blob) {
 		close(pipe_file_descriptors[1]);
 		close(pipe_file_descriptors[3]);
 		while ((len = read(pipe_file_descriptors[2], buf, BUF_SIZE)) > 0) {
-			
-			// printf("len = %d\n", len);
-			int i;
-			// for (i=0; i<len; i++) {
-			// 	printf("%02x ", buf[i]);
-			// }
 			write(fd, buf, len);
 		}
 		
