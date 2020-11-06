@@ -463,6 +463,26 @@ void extract_blob(char *blob_pathname) {
 		free(filename);
 		exit(1);
 	}
+
+	int pipe_file_descriptors[4];
+	pid_t pid;
+	int xz = check_xz(fd, pipe_file_descriptors, &pid);
+	if (xz) {
+		int len;
+		close(pipe_file_descriptors[0]);
+		do {
+			len = read(fd, buf, BUF_SIZE);
+			// printf("len1 = %d\n", len);
+			len = write(pipe_file_descriptors[1], buf, len);
+			// printf("len 2= %d\n", len);
+		} while (len > 0);
+		
+		close(pipe_file_descriptors[1]);
+		close(pipe_file_descriptors[3]);
+		close(fd);
+		fd = pipe_file_descriptors[2];
+	}
+
 	while (get_metadata(fd, buf, &mode, &pathname_len, &content_len, &hash_val)) {
 		ssize_t copied = 0;
 		int cfd;
@@ -529,6 +549,12 @@ void extract_blob(char *blob_pathname) {
 		close(cfd);
 	}
 	close(fd);
+	if (xz) {
+		if (waitpid(pid, NULL, 0) == -1) {
+			perror("waitpid");
+			exit(1);
+		}
+	}
 	free(filename);
 
 }
