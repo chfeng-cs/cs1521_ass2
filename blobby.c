@@ -12,6 +12,9 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <dirent.h>
+#include <spawn.h>
+#include <sys/wait.h>
 
 // the first byte of every blobette has this value
 #define BLOBETTE_MAGIC_NUMBER          0x42
@@ -54,20 +57,19 @@ uint8_t blobby_hash(uint8_t hash, uint8_t byte);
 
 // ADD YOUR FUNCTION PROTOTYPES HERE
 
-void read_buf(int fd, char *buf, size_t *len_left) {
-	
-}
-
-int get_metadata(int fd, u_int8_t *buf, unsigned long *mode, ssize_t *pathname_len, unsigned long *content_len) {
+int get_metadata(int fd, u_int8_t *buf, unsigned long *mode, ssize_t *pathname_len, unsigned long *content_len, u_int8_t *hash_val) {
 	int i;
 	ssize_t len = 0;
 	*pathname_len = 0;
 	*content_len = 0;
 	*mode = 0;
+	u_int8_t _hash_val = 0;
 	len = read(fd, buf, BLOBETTE_MAGIC_NUMBER_BYTES);
 	if (len <= 0) {
 		return 0;
 	}
+	_hash_val = blobby_hash(_hash_val, buf[0]);
+	// printf("%x -> %x\n", buf[0], _hash_val);
 	if (buf[0] != 0x42) {
 		fprintf(stderr, "ERROR: Magic byte of blobette incorrect\n");
 		exit(1);
@@ -76,35 +78,139 @@ int get_metadata(int fd, u_int8_t *buf, unsigned long *mode, ssize_t *pathname_l
 	for (i=0; i<BLOBETTE_MODE_LENGTH_BYTES; i++) {
 		*mode *= BYTE_VAL;
 		*mode += buf[i];
+		_hash_val = blobby_hash(_hash_val, buf[i]);
+		// printf("%x -> %x\n", buf[i], _hash_val);
 	}
-	// printf("mode = %10o\n", mode) ;
+	// printf("mode = %10o\n", *mode) ;
 	read(fd, buf, BLOBETTE_PATHNAME_LENGTH_BYTES);
 	for (i=0; i<BLOBETTE_PATHNAME_LENGTH_BYTES; i++) {
 		*pathname_len *= BYTE_VAL;
 		*pathname_len += buf[i];
+		_hash_val = blobby_hash(_hash_val, buf[i]);
+		// printf("%x -> %x\n", buf[i], _hash_val);
 	}
-	// printf("pathlen: %d\n", pathname_len);
+	// printf("pathlen: %d\n", *pathname_len);
 	read(fd, buf, BLOBETTE_CONTENT_LENGTH_BYTES);
 	for (i=0; i<BLOBETTE_CONTENT_LENGTH_BYTES; i++) {
 		*content_len *= BYTE_VAL;
 		*content_len += buf[i];
+		_hash_val = blobby_hash(_hash_val, buf[i]);
+		// printf("%x -> %x\n", buf[i], _hash_val);
+	}
+	if (hash_val) {
+		*hash_val = _hash_val;
 	}
 	return 1;
 }
 
-// void check_magic(int fd, uint8_t* buf) {
-// 	int len = read(fd, buf, BUF_SIZE);
-// 	uint8_t ret = 0;
-// 	while (len > 0) {
-// 		int i;
-// 		u_int8_t last_bit;
-// 		for(i=0; i<0; i++) {
-// 			last_bit = 
-// 			ret = blobby_hash(ret, buf[i]);
-// 		}
-// 	}
-// 	lseek(fd, 0, SEEK_SET);
-// }
+void write_content(int fd, char *filename, size_t pathname_len, int flag) {
+	int ffd = open(filename, O_RDONLY);
+	uint8_t buf[BUF_SIZE + 1];
+	struct stat _stat;
+	unsigned long content_len;
+	u_int8_t tmp, hash_val = 0;
+	int i;
+
+	i = stat(filename, &_stat);
+	if (i < 0) {
+		// perror(filename);
+		fprintf(stderr, "%s: No such file or directory\n", filename);
+		exit(0);
+	}
+	printf("Adding: %s\n", filename);
+	content_len = _stat.st_size;
+	if (S_ISDIR(_stat.st_mode)) {
+		content_len = 0;
+	}
+	// printf("content_len: %d\n", content_len);
+	buf[0] = 0x42;
+	write(fd, buf, BLOBETTE_MAGIC_NUMBER_BYTES);
+	hash_val = blobby_hash(hash_val, 0x42);
+
+	for (i=0; i<BLOBETTE_MODE_LENGTH_BYTES; i++) {
+		int offset = (BLOBETTE_MODE_LENGTH_BYTES - 1 - i) * 8;
+		tmp = (_stat.st_mode & (0xff << offset)) >> offset;
+		buf[i] = tmp;
+		hash_val = blobby_hash(hash_val, tmp);
+	}
+	write(fd, buf, BLOBETTE_MODE_LENGTH_BYTES);
+
+	for (i=0; i<BLOBETTE_PATHNAME_LENGTH_BYTES; i++) {
+		int offset = (BLOBETTE_PATHNAME_LENGTH_BYTES - 1 - i) * 8;
+		tmp = (pathname_len & (0xff << offset)) >> offset;
+		buf[i] = tmp;
+		hash_val = blobby_hash(hash_val, tmp);
+	}
+	write(fd, buf, BLOBETTE_PATHNAME_LENGTH_BYTES);
+
+	for (i=0; i<BLOBETTE_CONTENT_LENGTH_BYTES; i++) {
+		int offset = (BLOBETTE_CONTENT_LENGTH_BYTES - 1 - i) * 8;
+		tmp = (content_len & (0xffUL << offset)) >> offset;
+		buf[i] = tmp;
+		hash_val = blobby_hash(hash_val, tmp);
+	}
+	write(fd, buf, BLOBETTE_CONTENT_LENGTH_BYTES);
+
+	for (i=0; i<pathname_len; i++) {
+		write(fd, filename + i, 1);
+		hash_val = blobby_hash(hash_val, filename[i]);
+	}
+
+	if (S_ISDIR(_stat.st_mode)) {
+		write(fd, &hash_val, BLOBETTE_HASH_BYTES);
+		close(ffd);
+		if (flag) {
+			DIR *dirp = opendir(filename);
+			struct dirent *de;
+			if (dirp == NULL) {
+				perror("1");
+				exit(1);
+			}
+			while ((de = readdir(dirp)) != NULL) {
+				char *c_filename;
+				if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) {
+					continue;
+				}
+				c_filename = malloc(BLOBETTE_MAX_PATHNAME_LENGTH);
+				memcpy(c_filename, filename, pathname_len);
+				c_filename[pathname_len] = '/';
+				while (de->d_name[i]) {
+					c_filename[pathname_len + i + 1] = de->d_name[i];
+					i++;
+				}
+				c_filename[pathname_len + i + 1] = 0;
+				write_content(fd, c_filename, pathname_len + i + 1, 1);
+				free(c_filename);
+			}
+			closedir(dirp);
+			
+		}
+	} else if (S_ISREG(_stat.st_mode)) {
+		ssize_t copied = 0;
+		while (copied < content_len) {
+			ssize_t len = content_len - copied;
+			if (len > BUF_SIZE) {
+				len = BUF_SIZE;
+			}
+			len = read(ffd, buf, len);
+			len = write(fd, buf, len);
+			copied += len;
+			for(i=0; i<len; i++) {
+				hash_val = blobby_hash(hash_val, buf[i]);
+			}
+			// printf("copied： %d\n", copied);
+			// printf("content_len %d\n", content_len);
+			// printf("len %d\n", len);
+		}
+		write(fd, &hash_val, BLOBETTE_HASH_BYTES);
+		close(ffd);
+	} else {
+		close(ffd);
+		exit(1);
+	}
+}
+
+
 
 // YOU SHOULD NOT NEED TO CHANGE main, usage or process_arguments
 
@@ -217,7 +323,7 @@ void list_blob(char *blob_pathname) {
 		free(filename);
 		exit(1);
 	}
-	while (get_metadata(fd, buf, &mode, &pathname_len, &content_len)) {
+	while (get_metadata(fd, buf, &mode, &pathname_len, &content_len, NULL)) {
 		ssize_t copied = 0;
 		printf("%06lo %5lu ", mode, content_len);
 		while (copied < pathname_len) {
@@ -241,45 +347,76 @@ void extract_blob(char *blob_pathname) {
 	unsigned long mode = 0;
 	char *filename= malloc(BLOBETTE_MAX_PATHNAME_LENGTH);
 	int fd = open(blob_pathname, O_RDONLY);
+	u_int8_t hash_val;
+	u_int8_t c_hash_val;
 	if (fd < 0) {
 		close(fd);
 		free(filename);
 		exit(1);
 	}
-	while (get_metadata(fd, buf, &mode, &pathname_len, &content_len)) {
+	while (get_metadata(fd, buf, &mode, &pathname_len, &content_len, &hash_val)) {
 		ssize_t copied = 0;
-		// unsigned long left_len = content_len;
 		int cfd;
-		while (copied < pathname_len) {
-			copied += read(fd, filename + copied, pathname_len - copied);
-		}
+		int i;
+		// while (copied < pathname_len) {
+		// 	ssize_t len = pathname_len - copied;
+		// 	if (len > BUF_SIZE) {
+		// 		len = BUF_SIZE;
+		// 	}
+		// 	len = read(fd, buf, len);
+		// 	// printf("len = %d\n", len);
+		// 	buf[len] = 0;
+		// 	// printf("-----------\n");
+		// 	printf("%s", buf);
+		// 	copied += len;
+		// 	for(i=0; i<len; i++) {
+		// 		hash_val = blobby_hash(hash_val, buf[i]);
+		// 		// printf("%x -> %x\n", buf[i], hash_val);
+		// 	}
+		// }
+		read(fd, filename, pathname_len);
+		for(i=0; i<pathname_len; i++) {
+				hash_val = blobby_hash(hash_val, filename[i]);
+				// printf("%x -> %x\n", buf[i], hash_val);
+			}
 		filename[pathname_len] = 0;
-		printf("Extracting: %s\n", filename);
 		if (mode & S_IFDIR) {
+			printf("Creating directory: %s\n", filename);
 			mkdir(filename, mode);
+			// chmod(filename, mode);
 			read(fd, buf, 1);
 			continue;
 		}
-		cfd = open(filename, O_WRONLY|O_CREAT|O_TRUNC, mode);
+		printf("Extracting: %s\n", filename);
+		cfd = open(filename, O_WRONLY|O_CREAT, 0);
+		chmod(filename, mode);
+		// printf("mode: %10lo\n", mode);
 		copied = 0;
 		while (copied < content_len) {
 			ssize_t len = content_len - copied;
 			if (len > BUF_SIZE) {
 				len = BUF_SIZE;
 			}
-			printf("len1 = %d\n", len);
 			len = read(fd, buf, len);
-			printf("len2 = %d\n", len);
 			len = write(cfd, buf, len);
-			printf("len3 = %d\n", len);
-			printf("copied1 = %d\n", copied);
 			copied += len;
-			printf("copied2 = %d\n", copied);
-			printf("content_len: %d\tcopied: %d\n", content_len, copied);
+			for(i=0; i<len; i++) {
+				hash_val = blobby_hash(hash_val, buf[i]);
+				// printf("%x -> %x\n", buf[i], hash_val);
+			}
 		}
-		printf("content_len: %d\tcopied: %d\n", content_len, copied);
 		read(fd, buf, 1);
+		c_hash_val = buf[0];
+		// printf("c_hash_val: %x\n", c_hash_val);
+		// printf("hash_val: %x\n", hash_val);
 		// lseek(fd, content_len+1, SEEK_CUR);
+		if (c_hash_val != hash_val) {
+			fprintf(stderr, "ERROR: blob hash incorrect\n");
+			close(cfd);
+			close(fd);
+			free(filename);
+			exit(0);
+		}
 		close(cfd);
 	}
 	close(fd);
@@ -292,15 +429,80 @@ void extract_blob(char *blob_pathname) {
 
 void create_blob(char *blob_pathname, char *pathnames[], int compress_blob) {
 
-	// REPLACE WITH YOUR CODE FOR -c
+	// printf("create_blob called to create %s blob '%s' containing:\n",
+	// 	   compress_blob ? "compressed" : "non-compressed", blob_pathname);
 
-	printf("create_blob called to create %s blob '%s' containing:\n",
-		   compress_blob ? "compressed" : "non-compressed", blob_pathname);
+	char *filename= malloc(BLOBETTE_MAX_PATHNAME_LENGTH);
+	int fd = open(blob_pathname, O_WRONLY|O_CREAT, 0644);
+	int pfd = fd;
+	int pipe_file_descriptors[4];
+	posix_spawn_file_actions_t actions;
+	// if (compress_blob) {
+	// 	if (pipe(pipe_file_descriptors) == -1) {
+	// 		perror("pipe");
+	// 		exit(1);
+	// 	}
+	// 	if (pipe(pipe_file_descriptors + 2) == -1) {
+	// 		perror("pipe");
+	// 		exit(1);
+	// 	}
+	// 	if (posix_spawn_file_actions_init(&actions) != 0) {
+	// 		perror("posix_spawn_file_actions_init");
+	// 		exit(1);
+	// 	}
 
+	// 	if (posix_spawn_file_actions_addclose(&actions, pipe_file_descriptors[1]) != 0 ||
+	// 			posix_spawn_file_actions_addclose(&actions, pipe_file_descriptors[2]) != 0) {
+	// 		perror("posix_spawn_file_actions_addclose");
+	// 		exit(1);
+	// 	}
+		
+	// 	if (posix_spawn_file_actions_adddup2(&actions, pipe_file_descriptors[0], 0) != 0 ||
+	// 			posix_spawn_file_actions_adddup2(&actions, pipe_file_descriptors[3], 1) != 0) {
+	// 		perror("posix_spawn_file_actions_adddup2");
+	// 		exit(1);
+	// 	}
+	// 	pfd = pipe_file_descriptors[1];
+	// }
 	for (int p = 0; pathnames[p]; p++) {
-		printf("%s\n", pathnames[p]);
+		int i = 0;
+		char tmp;
+		char *_filename = pathnames[p];
+		while (_filename[i]) {
+			tmp = _filename[i];
+			if (tmp != '/') {
+				filename[i] = _filename[i];
+			} else {
+				filename[i] = 0;
+				write_content(fd, filename, i, 0);
+				filename[i] = '/';
+			}
+			i++;
+		}
+		filename[i] = 0;
+		write_content(fd, filename, i, 1);
 	}
+	// if (compress_blob) {
+	// 	close(pipe_file_descriptors[0]);
+	// 	close(pipe_file_descriptors[1]);
+	// 	close(pipe_file_descriptors[2]);
+	// 	// TODO
+	// 	u_int8_t buf[BUF_SIZE];
+	// 	int len;
+	// 	while ((len = read(pipe_file_descriptors[2], buf, BUF_SIZE)) > 0) {
+	// 		printf("len = %d\n", len);
+	// 		int i;
+	// 		for (i=0; i<len; i++) {
+	// 			printf("%02x ", buf[i]);
+	// 		}
+	// 		write(fd, buf, len);
+	// 	}
+	// 	close(pipe_file_descriptors[3]);
+		
+	// }
 
+	close(fd);
+	free(filename);
 }
 
 
